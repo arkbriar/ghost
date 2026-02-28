@@ -1,4 +1,4 @@
-# Time-Triggered Agent Loop
+# ghost
 
 A continuously running agent loop that:
 
@@ -58,6 +58,8 @@ uv run python main.py --api-key "your-token" --base-url "https://api.openai.com/
 ## Notes
 
 - The loop is autonomous; there is no human-input path.
+- Current real run profile: jumpy behaviors are disabled, and only random `1.0` to `10.0` second intervals are used.
+- Equivalent flags: `--interval-min 1 --interval-max 10 --long-sleep-prob 0 --burst-prob 0 --sensor-noise-prob 0`.
 - Trigger interval is uneven by default (`1.0` to `10.0` seconds, randomized each round).
 - Rarely, a long sleep (`>30s`) is scheduled and a warning is printed first.
 - Rarely, burst mode starts and then stays active for `50` rounds by default, using short sleeps (`1.0` to `2.0` seconds).
