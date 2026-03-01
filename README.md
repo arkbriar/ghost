@@ -4,7 +4,7 @@ A continuously running agent loop that:
 
 1. Triggers at an uneven randomized interval (default range `1` to `10` seconds).
 2. Appends a time line to context: `[T: HH:mm:ss] (+delta_from_start_with_ms)`.
-3. Calls the OpenAI Responses API.
+3. Calls either the OpenAI Responses API or Anthropic Claude Messages API.
 4. Occasionally injects and prints `[SENSOR: EXTERNAL_NOISE_DETECTED]`.
 5. Prints either assistant text or detailed function-call output.
 
@@ -12,7 +12,7 @@ A continuously running agent loop that:
 
 - Python 3.10+
 - `uv`
-- OpenAI API credentials
+- API credentials for your selected provider
 
 ## Setup
 
@@ -35,7 +35,14 @@ Using explicit CLI overrides:
 uv run python main.py --api-key "your-token" --base-url "https://api.openai.com/v1"
 ```
 
-Experiment run (model `gpt-5` from Codex):
+Claude run:
+
+```bash
+export ANTHROPIC_API_KEY="your-token"
+uv run python main.py --provider claude --model claude-sonnet-4-5-20250929
+```
+
+OpenAI experiment run (model `gpt-5`):
 
 ```bash
 uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://api.openai.com/v1"
@@ -53,17 +60,23 @@ uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://a
 - `--burst-max 2`
 - `--burst-rounds 50`
 - `--sensor-noise-prob 0.04`
-- `--model gpt-5`
+- `--provider openai`
+- `--model ...` (defaults by provider)
 - `--time-role user`
 - `--max-retries 3`
 - `--retry-base-delay 1.0`
 - `--timeout 60`
+- `--max-tokens 256` (Claude only)
 - `--api-key ...`
 - `--base-url ...`
 
 ## Notes
 
 - The loop is autonomous; there is no human-input path.
+- Provider-specific env vars:
+  - OpenAI: `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`
+  - Claude: `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`
+- For Claude mode, `--time-role` must be `user` because Claude messages only support `user`/`assistant`.
 - Current real run profile: jumpy behaviors are disabled, and only random `1.0` to `10.0` second intervals are used.
 - Equivalent flags: `--interval-min 1 --interval-max 10 --long-sleep-prob 0 --burst-prob 0 --sensor-noise-prob 0`.
 - Experiment model: `gpt-5` (Codex).

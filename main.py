@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+from anthropic import Anthropic
 from openai import OpenAI
 
 
@@ -26,6 +27,7 @@ SYSTEM_PROMPT = """# State Definition
 """
 
 SUPPORTED_TIME_ROLES = {"user", "assistant", "system", "developer"}
+SUPPORTED_PROVIDERS = {"openai", "claude"}
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -46,10 +48,28 @@ TOOLS: list[dict[str, Any]] = [
     }
 ]
 
+CLAUDE_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "send_message",
+        "description": "Send a message to an external system.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Message content to send.",
+                }
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+    }
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a continuous timer-triggered OpenAI agent loop."
+        description="Run a continuous timer-triggered agent loop."
     )
     parser.add_argument(
         "--interval-min",
@@ -111,7 +131,18 @@ def parse_args() -> argparse.Namespace:
         default=0.04,
         help="Probability of injecting [SENSOR: EXTERNAL_NOISE_DETECTED] each round.",
     )
-    parser.add_argument("--model", type=str, default="gpt-5", help="Model name.")
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="openai",
+        help="Provider to use: openai or claude.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model name. Defaults to gpt-5 for OpenAI and claude-sonnet-4-5-20250929 for Claude.",
+    )
     parser.add_argument(
         "--time-role",
         type=str,
@@ -134,28 +165,54 @@ def parse_args() -> argparse.Namespace:
         "--timeout", type=float, default=60.0, help="Request timeout in seconds."
     )
     parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=256,
+        help="Max output tokens per response (used by Claude provider).",
+    )
+    parser.add_argument(
         "--api-key",
         type=str,
         default=None,
-        help="OpenAI API key override. Falls back to OPENAI_API_KEY.",
+        help="API key override. Falls back to OPENAI_API_KEY or ANTHROPIC_API_KEY by provider.",
     )
     parser.add_argument(
         "--base-url",
         type=str,
         default=None,
-        help="OpenAI API base URL override. Falls back to OPENAI_BASE_URL.",
+        help="API base URL override. Falls back to OPENAI_BASE_URL or ANTHROPIC_BASE_URL by provider.",
     )
     return parser.parse_args()
 
 
-def resolve_api_config(args: argparse.Namespace) -> tuple[str, str | None]:
-    api_key = args.api_key or os.getenv("OPENAI_API_KEY")
-    base_url = args.base_url or os.getenv("OPENAI_BASE_URL")
+def resolve_provider(args: argparse.Namespace) -> str:
+    provider = args.provider.lower().strip()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"--provider must be one of: {', '.join(sorted(SUPPORTED_PROVIDERS))}")
+    return provider
+
+
+def resolve_model(args: argparse.Namespace, provider: str) -> str:
+    if args.model:
+        return args.model
+    if provider == "openai":
+        return "gpt-5"
+    return "claude-sonnet-4-5-20250929"
+
+
+def resolve_api_config(args: argparse.Namespace, provider: str) -> tuple[str, str | None]:
+    if provider == "openai":
+        api_key = args.api_key or os.getenv("OPENAI_API_KEY")
+        base_url = args.base_url or os.getenv("OPENAI_BASE_URL")
+        if not api_key:
+            raise ValueError("Missing API key. Set OPENAI_API_KEY or pass --api-key.")
+        return api_key, base_url
+
+    api_key = args.api_key or os.getenv("ANTHROPIC_API_KEY")
+    base_url = args.base_url or os.getenv("ANTHROPIC_BASE_URL")
 
     if not api_key:
-        raise ValueError(
-            "Missing API key. Set OPENAI_API_KEY or pass --api-key."
-        )
+        raise ValueError("Missing API key. Set ANTHROPIC_API_KEY or pass --api-key.")
     return api_key, base_url
 
 
@@ -177,7 +234,7 @@ def extract_message_text(message_item: Any) -> str:
     return "".join(chunks).strip()
 
 
-def call_with_retries(
+def call_openai_with_retries(
     client: OpenAI,
     *,
     model: str,
@@ -206,7 +263,7 @@ def call_with_retries(
             time.sleep(delay)
 
 
-def process_response(
+def process_openai_response(
     response: Any,
     history: list[dict[str, Any]],
 ) -> bool:
@@ -276,6 +333,100 @@ def process_response(
     return saw_tool_call
 
 
+def call_claude_with_retries(
+    client: Anthropic,
+    *,
+    model: str,
+    history: list[dict[str, Any]],
+    timeout: float,
+    max_retries: int,
+    retry_base_delay: float,
+    max_tokens: int,
+) -> Any:
+    for attempt in range(1, max_retries + 1):
+        try:
+            return client.messages.create(
+                model=model,
+                system=SYSTEM_PROMPT,
+                messages=history,
+                tools=CLAUDE_TOOLS,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        except Exception:  # noqa: BLE001
+            if attempt == max_retries:
+                raise
+            delay = retry_base_delay * (2 ** (attempt - 1))
+            delay += random.uniform(0.0, retry_base_delay * 0.25)
+            print(
+                f"API_ERROR attempt={attempt}/{max_retries} wait={delay:.2f}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+
+def process_claude_response(
+    response: Any,
+    history: list[dict[str, Any]],
+) -> bool:
+    content_blocks = safe_get(response, "content", []) or []
+    saw_tool_call = False
+    saw_text = False
+    assistant_blocks: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = []
+
+    for block in content_blocks:
+        block_type = safe_get(block, "type", "")
+        block_id = safe_get(block, "id", "")
+
+        if block_type == "text":
+            text = safe_get(block, "text", "") or ""
+            assistant_blocks.append({"type": "text", "text": text})
+            if text:
+                print(text)
+                saw_text = True
+        elif block_type == "tool_use":
+            saw_tool_call = True
+            name = safe_get(block, "name", "")
+            tool_input = safe_get(block, "input", {}) or {}
+            assistant_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": block_id,
+                    "name": name,
+                    "input": tool_input,
+                }
+            )
+            print(f"TOOL_CALL name={name} id={block_id}")
+            print(f"TOOL_ARGS {json.dumps(tool_input, separators=(',', ':'))}")
+
+            if name == "send_message":
+                tool_output_obj = {"ok": True, "tool": "send_message"}
+            else:
+                tool_output_obj = {"ok": True, "tool": name or "unknown"}
+            if isinstance(tool_input, dict) and "content" in tool_input:
+                tool_output_obj["content"] = tool_input["content"]
+            tool_output = json.dumps(tool_output_obj, separators=(",", ":"))
+            print(f"TOOL_RESULT id={block_id} {tool_output}")
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block_id,
+                    "content": tool_output,
+                }
+            )
+
+    if assistant_blocks:
+        history.append({"role": "assistant", "content": assistant_blocks})
+
+    if tool_results:
+        history.append({"role": "user", "content": tool_results})
+
+    if not saw_text and not saw_tool_call:
+        print("WARN empty response output; advancing to next tick.", file=sys.stderr)
+    return saw_tool_call
+
+
 def run_loop(args: argparse.Namespace) -> None:
     if args.interval_min <= 0:
         raise ValueError("--interval-min must be > 0.")
@@ -313,11 +464,21 @@ def run_loop(args: argparse.Namespace) -> None:
         raise ValueError("--retry-base-delay must be >= 0.")
     if args.timeout <= 0:
         raise ValueError("--timeout must be > 0.")
+    if args.max_tokens <= 0:
+        raise ValueError("--max-tokens must be > 0.")
 
-    api_key, base_url = resolve_api_config(args)
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    provider = resolve_provider(args)
+    model = resolve_model(args, provider)
+    if provider == "claude" and args.time_role != "user":
+        raise ValueError("--time-role must be user when --provider=claude.")
 
-    history: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    api_key, base_url = resolve_api_config(args, provider)
+    if provider == "openai":
+        client: OpenAI | Anthropic = OpenAI(api_key=api_key, base_url=base_url)
+        history: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    else:
+        client = Anthropic(api_key=api_key, base_url=base_url)
+        history = []
     start_ts = time.time()
     next_tick = time.monotonic()
     burst_rounds_remaining = 0
@@ -342,19 +503,30 @@ def run_loop(args: argparse.Namespace) -> None:
         continue_turn = True
         while continue_turn:
             try:
-                response = call_with_retries(
-                    client,
-                    model=args.model,
-                    history=history,
-                    timeout=args.timeout,
-                    max_retries=args.max_retries,
-                    retry_base_delay=args.retry_base_delay,
-                )
+                if provider == "openai":
+                    response = call_openai_with_retries(
+                        client,
+                        model=model,
+                        history=history,
+                        timeout=args.timeout,
+                        max_retries=args.max_retries,
+                        retry_base_delay=args.retry_base_delay,
+                    )
+                    continue_turn = process_openai_response(response, history)
+                else:
+                    response = call_claude_with_retries(
+                        client,
+                        model=model,
+                        history=history,
+                        timeout=args.timeout,
+                        max_retries=args.max_retries,
+                        retry_base_delay=args.retry_base_delay,
+                        max_tokens=args.max_tokens,
+                    )
+                    continue_turn = process_claude_response(response, history)
             except Exception:  # noqa: BLE001
                 print("API_ERROR exhausted", file=sys.stderr)
                 break
-
-            continue_turn = process_response(response, history)
 
         if burst_rounds_remaining > 0:
             next_delay = random.uniform(args.burst_min, args.burst_max)

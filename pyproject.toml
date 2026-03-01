@@ -1,10 +1,11 @@
 [project]
 name = "ghost"
 version = "0.1.0"
-description = "Continuous timer-driven agent loop using OpenAI Responses API."
+description = "Continuous timer-driven agent loop using OpenAI or Claude APIs."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "anthropic>=0.72.0",
   "openai>=1.60.0",
 ]
 
