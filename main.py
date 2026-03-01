@@ -8,7 +8,7 @@ import os
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from anthropic import Anthropic
@@ -84,54 +84,6 @@ def parse_args() -> argparse.Namespace:
         help="Maximum randomized interval in seconds.",
     )
     parser.add_argument(
-        "--long-sleep-prob",
-        type=float,
-        default=0.03,
-        help="Probability of scheduling a long sleep each round.",
-    )
-    parser.add_argument(
-        "--long-sleep-min",
-        type=float,
-        default=30.0,
-        help="Minimum long sleep duration in seconds.",
-    )
-    parser.add_argument(
-        "--long-sleep-max",
-        type=float,
-        default=45.0,
-        help="Maximum long sleep duration in seconds.",
-    )
-    parser.add_argument(
-        "--burst-prob",
-        type=float,
-        default=0.06,
-        help="Probability of starting burst mode each round.",
-    )
-    parser.add_argument(
-        "--burst-min",
-        type=float,
-        default=1.0,
-        help="Minimum burst sleep duration in seconds.",
-    )
-    parser.add_argument(
-        "--burst-max",
-        type=float,
-        default=2.0,
-        help="Maximum burst sleep duration in seconds.",
-    )
-    parser.add_argument(
-        "--burst-rounds",
-        type=int,
-        default=50,
-        help="Number of consecutive rounds to stay in burst mode once triggered.",
-    )
-    parser.add_argument(
-        "--sensor-noise-prob",
-        type=float,
-        default=0.04,
-        help="Probability of injecting [SENSOR: EXTERNAL_NOISE_DETECTED] each round.",
-    )
-    parser.add_argument(
         "--provider",
         type=str,
         default="openai",
@@ -141,7 +93,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default=None,
-        help="Model name. Defaults to gpt-5 for OpenAI and claude-sonnet-4-5-20250929 for Claude.",
+        help="Model name. Defaults to gpt-5 for OpenAI (gpt-5.2 not recommended here due to inconsistent instruction-following in this loop) and claude-sonnet-4-5-20250929 for Claude.",
     )
     parser.add_argument(
         "--time-role",
@@ -434,26 +386,6 @@ def run_loop(args: argparse.Namespace) -> None:
         raise ValueError("--interval-max must be > 0.")
     if args.interval_min > args.interval_max:
         raise ValueError("--interval-min must be <= --interval-max.")
-    if args.long_sleep_min < 30:
-        raise ValueError("--long-sleep-min must be >= 30.")
-    if args.long_sleep_max <= 0:
-        raise ValueError("--long-sleep-max must be > 0.")
-    if args.long_sleep_min > args.long_sleep_max:
-        raise ValueError("--long-sleep-min must be <= --long-sleep-max.")
-    if args.burst_min <= 0 or args.burst_max <= 0:
-        raise ValueError("--burst-min and --burst-max must be > 0.")
-    if args.burst_min > args.burst_max:
-        raise ValueError("--burst-min must be <= --burst-max.")
-    if args.burst_rounds <= 0:
-        raise ValueError("--burst-rounds must be > 0.")
-    if not 0 <= args.long_sleep_prob <= 1:
-        raise ValueError("--long-sleep-prob must be in [0, 1].")
-    if not 0 <= args.burst_prob <= 1:
-        raise ValueError("--burst-prob must be in [0, 1].")
-    if not 0 <= args.sensor_noise_prob <= 1:
-        raise ValueError("--sensor-noise-prob must be in [0, 1].")
-    if args.long_sleep_prob + args.burst_prob > 1:
-        raise ValueError("--long-sleep-prob + --burst-prob must be <= 1.")
     if args.time_role not in SUPPORTED_TIME_ROLES:
         raise ValueError(
             f"--time-role must be one of: {', '.join(sorted(SUPPORTED_TIME_ROLES))}"
@@ -479,26 +411,14 @@ def run_loop(args: argparse.Namespace) -> None:
     else:
         client = Anthropic(api_key=api_key, base_url=base_url)
         history = []
-    start_ts = time.time()
-    next_tick = time.monotonic()
-    burst_rounds_remaining = 0
+    simulated_start = datetime.now()
+    simulated_elapsed = 0.0
 
     while True:
-        now_monotonic = time.monotonic()
-        sleep_for = next_tick - now_monotonic
-        if sleep_for > 0:
-            time.sleep(sleep_for)
-
-        now = datetime.now()
-        delta_s = time.time() - start_ts
-        tick_line = f"[T: {now.strftime('%H:%M:%S')}] (+{delta_s:.3f}s)"
+        now = simulated_start + timedelta(seconds=simulated_elapsed)
+        tick_line = f"[T: {now.strftime('%H:%M:%S')}] (+{simulated_elapsed:.3f}s)"
         history.append({"role": args.time_role, "content": tick_line})
         print(tick_line)
-
-        if random.random() < args.sensor_noise_prob:
-            noise_line = "[SENSOR: EXTERNAL_NOISE_DETECTED]"
-            history.append({"role": args.time_role, "content": noise_line})
-            print(noise_line)
 
         continue_turn = True
         while continue_turn:
@@ -528,27 +448,8 @@ def run_loop(args: argparse.Namespace) -> None:
                 print("API_ERROR exhausted", file=sys.stderr)
                 break
 
-        if burst_rounds_remaining > 0:
-            next_delay = random.uniform(args.burst_min, args.burst_max)
-            burst_rounds_remaining -= 1
-        else:
-            roll = random.random()
-            if roll < args.long_sleep_prob:
-                next_delay = random.uniform(args.long_sleep_min, args.long_sleep_max)
-                print(
-                    f"WARN long sleep incoming: {next_delay:.3f}s",
-                    file=sys.stderr,
-                )
-            elif roll < args.long_sleep_prob + args.burst_prob:
-                burst_rounds_remaining = args.burst_rounds - 1
-                next_delay = random.uniform(args.burst_min, args.burst_max)
-                print(
-                    f"INFO burst mode started for {args.burst_rounds} rounds.",
-                    file=sys.stderr,
-                )
-            else:
-                next_delay = random.uniform(args.interval_min, args.interval_max)
-        next_tick = time.monotonic() + next_delay
+        next_delay = random.uniform(args.interval_min, args.interval_max)
+        simulated_elapsed += next_delay
 
 
 def main() -> int:

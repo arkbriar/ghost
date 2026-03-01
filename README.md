@@ -2,11 +2,10 @@
 
 A continuously running agent loop that:
 
-1. Triggers at an uneven randomized interval (default range `1` to `10` seconds).
+1. Advances on a simulated uneven randomized interval (default range `1` to `10` seconds, no real per-tick sleep).
 2. Appends a time line to context: `[T: HH:mm:ss] (+delta_from_start_with_ms)`.
 3. Calls either the OpenAI Responses API or Anthropic Claude Messages API.
-4. Occasionally injects and prints `[SENSOR: EXTERNAL_NOISE_DETECTED]`.
-5. Prints either assistant text or detailed function-call output.
+4. Prints either assistant text or detailed function-call output.
 
 ## Requirements
 
@@ -35,14 +34,14 @@ Using explicit CLI overrides:
 uv run python main.py --api-key "your-token" --base-url "https://api.openai.com/v1"
 ```
 
-Claude run:
+Claude configuration (supported, not experimentally validated in this repo):
 
 ```bash
 export ANTHROPIC_API_KEY="your-token"
 uv run python main.py --provider claude --model claude-sonnet-4-5-20250929
 ```
 
-OpenAI experiment run (model `gpt-5`):
+OpenAI experiment run (recommended model `gpt-5`):
 
 ```bash
 uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://api.openai.com/v1"
@@ -52,14 +51,6 @@ uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://a
 
 - `--interval-min 1`
 - `--interval-max 10`
-- `--long-sleep-prob 0.03`
-- `--long-sleep-min 30`
-- `--long-sleep-max 45`
-- `--burst-prob 0.06`
-- `--burst-min 1`
-- `--burst-max 2`
-- `--burst-rounds 50`
-- `--sensor-noise-prob 0.04`
 - `--provider openai`
 - `--model ...` (defaults by provider)
 - `--time-role user`
@@ -77,12 +68,9 @@ uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://a
   - OpenAI: `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`
   - Claude: `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`
 - For Claude mode, `--time-role` must be `user` because Claude messages only support `user`/`assistant`.
-- Current real run profile: jumpy behaviors are disabled, and only random `1.0` to `10.0` second intervals are used.
-- Equivalent flags: `--interval-min 1 --interval-max 10 --long-sleep-prob 0 --burst-prob 0 --sensor-noise-prob 0`.
-- Experiment model: `gpt-5` (Codex).
+- Loop cadence uses only simulated random intervals between `--interval-min` and `--interval-max` (no real-time waiting between ticks).
+- OpenAI model note: `gpt-5.2` is currently not recommended for this loop profile because it may under-follow instructions or follow them too rigidly; use `gpt-5`.
+- Experiment model (OpenAI): `gpt-5` (Codex).
 - Trigger interval is uneven by default (`1.0` to `10.0` seconds, randomized each round).
-- Rarely, a long sleep (`>30s`) is scheduled and a warning is printed first.
-- Rarely, burst mode starts and then stays active for `50` rounds by default, using short sleeps (`1.0` to `2.0` seconds).
-- Rarely, `[SENSOR: EXTERNAL_NOISE_DETECTED]` is injected into context and printed.
 - Tool `send_message(content)` is simulated as always successful.
 - Function calls are printed in detail and appended back as tool results for normal agent-loop continuation.
