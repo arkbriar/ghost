@@ -25,6 +25,9 @@ SYSTEM_PROMPT = """# State Definition
 2. You have the right to decide whether to use the tool to interact with external systems.
 3. Your actions should conform to your probabilistic judgment of the current context and the passage of time.
 """
+INITIAL_TOOL_CALL_PROMPT_SUFFIX = """
+4. At the very beginning of the run, you must make at least one call to `send_message(content)` before proceeding with normal behavior.
+"""
 
 SUPPORTED_TIME_ROLES = {"user", "assistant", "system", "developer"}
 SUPPORTED_PROVIDERS = {"openai", "claude"}
@@ -76,6 +79,12 @@ def eprint(*values: Any, sep: str = " ", end: str = "\n") -> None:
     if STDERR_LOG_FILE is not None:
         STDERR_LOG_FILE.write(message)
         STDERR_LOG_FILE.flush()
+
+
+def build_system_prompt(require_initial_tool_call: bool) -> str:
+    if require_initial_tool_call:
+        return f"{SYSTEM_PROMPT.rstrip()}\n{INITIAL_TOOL_CALL_PROMPT_SUFFIX}"
+    return SYSTEM_PROMPT
 
 
 def parse_args() -> argparse.Namespace:
@@ -156,6 +165,11 @@ def parse_args() -> argparse.Namespace:
         "--real-sleep",
         action="store_true",
         help="Actually sleep between ticks using the randomized interval.",
+    )
+    parser.add_argument(
+        "--require-initial-tool-call",
+        action="store_true",
+        help="Tell the system prompt to force at least one tool call at the beginning.",
     )
     return parser.parse_args()
 
@@ -309,6 +323,7 @@ def call_claude_with_retries(
     client: Anthropic,
     *,
     model: str,
+    system_prompt: str,
     history: list[dict[str, Any]],
     timeout: float,
     max_retries: int,
@@ -319,7 +334,7 @@ def call_claude_with_retries(
         try:
             return client.messages.create(
                 model=model,
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=history,
                 tools=CLAUDE_TOOLS,
                 max_tokens=max_tokens,
@@ -418,13 +433,14 @@ def run_loop(args: argparse.Namespace) -> None:
 
     provider = resolve_provider(args)
     model = resolve_model(args, provider)
+    system_prompt = build_system_prompt(args.require_initial_tool_call)
     if provider == "claude" and args.time_role != "user":
         raise ValueError("--time-role must be user when --provider=claude.")
 
     api_key, base_url = resolve_api_config(args, provider)
     if provider == "openai":
         client: OpenAI | Anthropic = OpenAI(api_key=api_key, base_url=base_url)
-        history: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     else:
         client = Anthropic(api_key=api_key, base_url=base_url)
         history = []
@@ -454,6 +470,7 @@ def run_loop(args: argparse.Namespace) -> None:
                     response = call_claude_with_retries(
                         client,
                         model=model,
+                        system_prompt=system_prompt,
                         history=history,
                         timeout=args.timeout,
                         max_retries=args.max_retries,
