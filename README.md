@@ -60,6 +60,8 @@ uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://a
 - `--max-tokens 256` (Claude only)
 - `--api-key ...`
 - `--base-url ...`
+- `--stderr-log-file /path/to/stderr.log` (append stderr output to file and stderr)
+- `--real-sleep` (sleep in real time between ticks)
 
 ## Notes
 
@@ -68,7 +70,8 @@ uv run python main.py --model gpt-5 --api-key "your-token" --base-url "https://a
   - OpenAI: `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`
   - Claude: `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`
 - For Claude mode, `--time-role` must be `user` because Claude messages only support `user`/`assistant`.
-- Loop cadence uses only simulated random intervals between `--interval-min` and `--interval-max` (no real-time waiting between ticks).
+- Loop cadence uses simulated random intervals by default (no real-time waiting between ticks).
+- Use `--real-sleep` to wait in wall-clock time for each randomized interval.
 - OpenAI model note: `gpt-5.2` is currently not recommended for this loop profile because it may under-follow instructions or follow them too rigidly; use `gpt-5`.
 - Experiment model (OpenAI): `gpt-5` (Codex).
 - Trigger interval is uneven by default (`1.0` to `10.0` seconds, randomized each round).

@@ -9,7 +9,7 @@ import random
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, TextIO
 
 from anthropic import Anthropic
 from openai import OpenAI
@@ -66,10 +66,22 @@ CLAUDE_TOOLS: list[dict[str, Any]] = [
     }
 ]
 
+STDERR_LOG_FILE: TextIO | None = None
+
+
+def eprint(*values: Any, sep: str = " ", end: str = "\n") -> None:
+    message = sep.join(str(v) for v in values) + end
+    sys.stderr.write(message)
+    sys.stderr.flush()
+    if STDERR_LOG_FILE is not None:
+        STDERR_LOG_FILE.write(message)
+        STDERR_LOG_FILE.flush()
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a continuous timer-triggered agent loop."
+        description="Run a continuous timer-triggered agent loop.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--interval-min",
@@ -133,6 +145,17 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="API base URL override. Falls back to OPENAI_BASE_URL or ANTHROPIC_BASE_URL by provider.",
+    )
+    parser.add_argument(
+        "--stderr-log-file",
+        type=str,
+        default=None,
+        help="Optional file path to append stderr logs to while still printing to stderr.",
+    )
+    parser.add_argument(
+        "--real-sleep",
+        action="store_true",
+        help="Actually sleep between ticks using the randomized interval.",
     )
     return parser.parse_args()
 
@@ -203,15 +226,12 @@ def call_openai_with_retries(
                 tools=TOOLS,
                 timeout=timeout,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             if attempt == max_retries:
                 raise
             delay = retry_base_delay * (2 ** (attempt - 1))
             delay += random.uniform(0.0, retry_base_delay * 0.25)
-            print(
-                f"API_ERROR attempt={attempt}/{max_retries} wait={delay:.2f}s",
-                file=sys.stderr,
-            )
+            eprint(f"API_ERROR attempt={attempt}/{max_retries} wait={delay:.2f}s")
             time.sleep(delay)
 
 
@@ -228,7 +248,7 @@ def process_openai_response(
         if item_type == "message":
             text = extract_message_text(item)
             if text:
-                print(text)
+                eprint(text)
                 history.append({"role": "assistant", "content": text})
                 saw_text = True
         elif item_type == "function_call":
@@ -237,8 +257,8 @@ def process_openai_response(
             call_id = safe_get(item, "call_id", "")
             arguments = safe_get(item, "arguments", "") or "{}"
 
-            print(f"TOOL_CALL name={name} id={call_id}")
-            print(f"TOOL_ARGS {arguments}")
+            eprint(f"TOOL_CALL name={name} id={call_id}")
+            eprint(f"TOOL_ARGS {arguments}")
 
             history.append(
                 {
@@ -263,7 +283,7 @@ def process_openai_response(
                 tool_output_obj["content"] = parsed_args["content"]
 
             tool_output = json.dumps(tool_output_obj, separators=(",", ":"))
-            print(f"TOOL_RESULT id={call_id} {tool_output}")
+            eprint(f"TOOL_RESULT id={call_id} {tool_output}")
             history.append(
                 {
                     "type": "function_call_output",
@@ -275,12 +295,12 @@ def process_openai_response(
     if not saw_text:
         output_text = safe_get(response, "output_text", "") or ""
         if output_text:
-            print(output_text)
+            eprint(output_text)
             history.append({"role": "assistant", "content": output_text})
             saw_text = True
 
     if not saw_text and not saw_tool_call:
-        print("WARN empty response output; advancing to next tick.", file=sys.stderr)
+        eprint("WARN empty response output; advancing to next tick.")
 
     return saw_tool_call
 
@@ -310,10 +330,7 @@ def call_claude_with_retries(
                 raise
             delay = retry_base_delay * (2 ** (attempt - 1))
             delay += random.uniform(0.0, retry_base_delay * 0.25)
-            print(
-                f"API_ERROR attempt={attempt}/{max_retries} wait={delay:.2f}s",
-                file=sys.stderr,
-            )
+            eprint(f"API_ERROR attempt={attempt}/{max_retries} wait={delay:.2f}s")
             time.sleep(delay)
 
 
@@ -335,7 +352,7 @@ def process_claude_response(
             text = safe_get(block, "text", "") or ""
             assistant_blocks.append({"type": "text", "text": text})
             if text:
-                print(text)
+                eprint(text)
                 saw_text = True
         elif block_type == "tool_use":
             saw_tool_call = True
@@ -349,8 +366,8 @@ def process_claude_response(
                     "input": tool_input,
                 }
             )
-            print(f"TOOL_CALL name={name} id={block_id}")
-            print(f"TOOL_ARGS {json.dumps(tool_input, separators=(',', ':'))}")
+            eprint(f"TOOL_CALL name={name} id={block_id}")
+            eprint(f"TOOL_ARGS {json.dumps(tool_input, separators=(',', ':'))}")
 
             if name == "send_message":
                 tool_output_obj = {"ok": True, "tool": "send_message"}
@@ -359,7 +376,7 @@ def process_claude_response(
             if isinstance(tool_input, dict) and "content" in tool_input:
                 tool_output_obj["content"] = tool_input["content"]
             tool_output = json.dumps(tool_output_obj, separators=(",", ":"))
-            print(f"TOOL_RESULT id={block_id} {tool_output}")
+            eprint(f"TOOL_RESULT id={block_id} {tool_output}")
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -375,7 +392,7 @@ def process_claude_response(
         history.append({"role": "user", "content": tool_results})
 
     if not saw_text and not saw_tool_call:
-        print("WARN empty response output; advancing to next tick.", file=sys.stderr)
+        eprint("WARN empty response output; advancing to next tick.")
     return saw_tool_call
 
 
@@ -418,7 +435,7 @@ def run_loop(args: argparse.Namespace) -> None:
         now = simulated_start + timedelta(seconds=simulated_elapsed)
         tick_line = f"[T: {now.strftime('%H:%M:%S')}] (+{simulated_elapsed:.3f}s)"
         history.append({"role": args.time_role, "content": tick_line})
-        print(tick_line)
+        eprint(tick_line)
 
         continue_turn = True
         while continue_turn:
@@ -445,23 +462,36 @@ def run_loop(args: argparse.Namespace) -> None:
                     )
                     continue_turn = process_claude_response(response, history)
             except Exception:  # noqa: BLE001
-                print("API_ERROR exhausted", file=sys.stderr)
+                eprint("API_ERROR exhausted")
                 break
 
         next_delay = random.uniform(args.interval_min, args.interval_max)
         simulated_elapsed += next_delay
+        if args.real_sleep:
+            time.sleep(next_delay)
 
 
 def main() -> int:
+    global STDERR_LOG_FILE
     args = parse_args()
     try:
+        if args.stderr_log_file:
+            log_path = os.path.abspath(os.path.expanduser(args.stderr_log_file))
+            log_dir = os.path.dirname(log_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            STDERR_LOG_FILE = open(log_path, "a", encoding="utf-8")
         run_loop(args)
     except KeyboardInterrupt:
-        print("Shutting down.")
+        eprint("Shutting down.")
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(f"ERROR {exc}", file=sys.stderr)
+        eprint(f"ERROR {exc}")
         return 1
+    finally:
+        if STDERR_LOG_FILE is not None:
+            STDERR_LOG_FILE.close()
+            STDERR_LOG_FILE = None
     return 0
 
 
