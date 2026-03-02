@@ -446,10 +446,17 @@ def run_loop(args: argparse.Namespace) -> None:
         history = []
     simulated_start = datetime.now()
     simulated_elapsed = 0.0
+    real_start_monotonic = time.monotonic()
 
     while True:
-        now = simulated_start + timedelta(seconds=simulated_elapsed)
-        tick_line = f"[T: {now.strftime('%H:%M:%S')}] (+{simulated_elapsed:.3f}s)"
+        if args.real_sleep:
+            now = datetime.now()
+            elapsed_seconds = time.monotonic() - real_start_monotonic
+        else:
+            now = simulated_start + timedelta(seconds=simulated_elapsed)
+            elapsed_seconds = simulated_elapsed
+
+        tick_line = f"[T: {now.strftime('%H:%M:%S')}] (+{elapsed_seconds:.3f}s)"
         history.append({"role": args.time_role, "content": tick_line})
         eprint(tick_line)
 
@@ -483,9 +490,10 @@ def run_loop(args: argparse.Namespace) -> None:
                 break
 
         next_delay = random.uniform(args.interval_min, args.interval_max)
-        simulated_elapsed += next_delay
         if args.real_sleep:
             time.sleep(next_delay)
+        else:
+            simulated_elapsed += next_delay
 
 
 def main() -> int:
